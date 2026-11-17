@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+.env
+**/__pycache__
+.pytest_cache
+tests
+grafana
+prometheus
+nginx
+k8s
+docs
+*.md

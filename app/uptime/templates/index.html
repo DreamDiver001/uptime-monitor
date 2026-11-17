@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{{ interval }}">
+<title>{% if down %}({{ down }} down) {% endif %}Uptime Monitor</title>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #1d2330; }
+  main { max-width: 960px; margin: 0 auto; padding: 28px 20px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 22px; margin: 0; }
+  .meta { color: #667085; font-size: 13px; }
+  .banner { margin: 18px 0; padding: 12px 16px; border-radius: 8px; font-weight: 600; }
+  .banner.ok { background: #e3f6e8; color: #17663a; }
+  .banner.bad { background: #fde8e8; color: #9b1c1c; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #eceef2; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #667085; background: #fafbfc; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .up { background: #22a755; } .down { background: #d92d20; } .pending { background: #b0b7c3; }
+  .url { color: #667085; font-size: 13px; word-break: break-all; }
+  button { font: inherit; border: 1px solid #d0d5dd; background: #fff; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button:hover { background: #f2f4f7; }
+  form { display: flex; gap: 8px; margin-top: 20px; flex-wrap: wrap; }
+  input { font: inherit; padding: 6px 10px; border: 1px solid #d0d5dd; border-radius: 6px; }
+  input[name=url] { flex: 1; min-width: 220px; }
+  #error { color: #9b1c1c; margin-top: 8px; min-height: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Uptime Monitor</h1>
+    <span class="meta">
+      {% if last_round is none %}Worker has not finished a round yet
+      {% else %}Last check round {{ last_round }} s ago, every {{ interval }} s{% endif %}
+    </span>
+  </header>
+
+  {% if targets %}
+    {% if down %}
+      <div class="banner bad">{{ down }} of {{ targets|length }} services down</div>
+    {% else %}
+      <div class="banner ok">All {{ targets|length }} services up</div>
+    {% endif %}
+    <table>
+      <tr><th>Service</th><th>Status</th><th>Response</th><th>Uptime 24 h</th><th>Last check</th><th></th></tr>
+      {% for t in targets %}
+      <tr>
+        <td>{{ t.name }}<div class="url">{{ t.url }}</div></td>
+        <td>
+          {% if t.ok is none %}<span class="dot pending"></span>pending
+          {% elif t.ok %}<span class="dot up"></span>up ({{ t.status_code }})
+          {% else %}<span class="dot down"></span>{{ t.error }}{% endif %}
+        </td>
+        <td class="num">{{ t.latency_ms ~ ' ms' if t.latency_ms is not none else '–' }}</td>
+        <td class="num">{{ t.uptime_24h ~ ' %' if t.uptime_24h is not none else '–' }}</td>
+        <td class="num">{{ t.checked_at.strftime('%H:%M:%S') if t.checked_at else '–' }}</td>
+        <td>
+          <button onclick="act('POST', '/api/targets/{{ t.id }}/check')">Check</button>
+          <button data-name="{{ t.name }}" onclick="if (confirm('Remove ' + this.dataset.name + '?')) act('DELETE', '/api/targets/{{ t.id }}')">Remove</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <div class="banner ok">No services yet. Add one below.</div>
+  {% endif %}
+
+  <form onsubmit="add(event)">
+    <input name="name" placeholder="Name" required maxlength="60">
+    <input name="url" placeholder="https://example.com" required>
+    <button>Add service</button>
+  </form>
+  <div id="error"></div>
+</main>
+<script>
+async function act(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const detail = Array.isArray(data.detail) ? data.detail.map(d => d.msg).join(", ") : data.detail;
+    document.getElementById("error").textContent = detail || res.statusText;
+    return;
+  }
+  setTimeout(() => location.reload(), method === "DELETE" ? 0 : 1500);
+}
+function add(event) {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  act("POST", "/api/targets", { name: form.get("name"), url: form.get("url") });
+}
+</script>
+</body>
+</html>

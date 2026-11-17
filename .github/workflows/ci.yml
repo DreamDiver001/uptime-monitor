@@ -1,0 +1,81 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q tests/unit
+
+  stack:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env
+        run: |
+          cp .env.example .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+          sed -i "s/^CHECK_INTERVAL=.*/CHECK_INTERVAL=10/" .env
+
+      - name: Validate config
+        run: |
+          docker compose config --quiet
+          docker run --rm --entrypoint promtool -v "$PWD/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.15.1 check config /etc/prometheus/prometheus.yml
+
+      - name: Build and start
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Image checks
+        run: |
+          size=$(docker image inspect uptime-monitor:local --format '{{.Size}}')
+          user=$(docker image inspect uptime-monitor:local --format '{{.Config.User}}')
+          echo "Image size: $((size / 1024 / 1024)) MB, user: $user" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$user" = "10001"
+          docker compose ps --format 'table {{.Service}}\t{{.Status}}' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Integration tests through nginx
+        env:
+          BASE_URL: http://localhost:8080
+          BEHIND_NGINX: "1"
+          PROM_URL: http://localhost:9090
+        run: |
+          pip install -q pytest httpx
+          pytest -q tests/integration -rs
+
+      - name: Data survives recreating the containers
+        run: |
+          curl -sf -X POST localhost:8080/api/targets -H 'Content-Type: application/json' \
+            -d '{"name": "persist-check", "url": "http://web:8000/healthz"}'
+          docker compose down
+          docker compose up -d --wait --wait-timeout 120
+          curl -sf localhost:8080/api/targets | grep -q persist-check
+          echo "Target still there after docker compose down/up" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Worker recovers from a database restart
+        run: |
+          docker compose restart db
+          sleep 25
+          docker compose ps worker --format '{{.Status}}' | tee /dev/stderr | grep -q '(healthy)'
+          curl -sf localhost:8080/readyz
+
+      - name: Grafana dashboard loaded
+        run: |
+          for i in $(seq 1 30); do curl -sf localhost:3000/api/health && break; sleep 2; done
+          curl -sf localhost:3000/api/dashboards/uid/uptime | grep -q '"title":"Uptime Monitor"'
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail=80
+
+      - name: Clean up
+        if: always()
+        run: docker compose down -v
