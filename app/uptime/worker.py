@@ -33,9 +33,12 @@ class Worker:
         self.client = client
         self.stop = threading.Event()
         self.known: set[str] = set()
+        self.round_pool = ThreadPoolExecutor(max_workers=10, thread_name_prefix="round")
+        self.queue_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="queued")
+        self.round_thread: threading.Thread | None = None
 
     def check_target(self, target: dict) -> None:
-        result = checker.check(self.client, target["url"])
+        result = checker.check(self.client, target["url"], settings.CHECK_DEADLINE)
         db.record_check(self.pool, target["id"], result.ok, result.status_code, result.latency_ms, result.error)
 
         name = target["name"]
@@ -50,8 +53,7 @@ class Worker:
     def run_round(self) -> None:
         started = time.monotonic()
         targets = db.all_targets(self.pool)
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            list(pool.map(self.check_target, targets))
+        list(self.round_pool.map(self.check_target, targets))
 
         names = {t["name"] for t in targets}
         for gone in self.known - names:
@@ -65,6 +67,19 @@ class Worker:
         LAST_ROUND.set_to_current_time()
         ROUND_DURATION.set(time.monotonic() - started)
         self.rdb.set(settings.LAST_ROUND_KEY, int(time.time()))
+
+    def safe(self, fn, *args) -> None:
+        try:
+            fn(*args)
+        except Exception as exc:
+            log.warning(json.dumps({"error": f"{type(exc).__name__}: {exc}", "in": fn.__name__}))
+
+    def start_round(self) -> None:
+        if self.round_thread and self.round_thread.is_alive():
+            log.warning(json.dumps({"event": "round_skipped", "reason": "previous round still running"}))
+            return
+        self.round_thread = threading.Thread(target=self.safe, args=(self.run_round,), name="scheduler")
+        self.round_thread.start()
 
     def handle_queued(self, raw: bytes) -> None:
         target = db.get_target(self.pool, int(raw))
@@ -82,7 +97,7 @@ class Worker:
             now = time.monotonic()
             try:
                 if now >= next_round:
-                    self.run_round()
+                    self.start_round()
                     next_round = now + settings.CHECK_INTERVAL
                 if now >= next_prune:
                     removed = db.prune(self.pool, settings.RETENTION_DAYS)
@@ -91,17 +106,21 @@ class Worker:
                     next_prune = now + 3600
                 item = self.rdb.blpop([settings.QUEUE_KEY], timeout=1)
                 if item:
-                    self.handle_queued(item[1])
+                    self.queue_pool.submit(self.safe, self.handle_queued, item[1])
             except (redis.ConnectionError, psycopg.OperationalError, PoolTimeout, OSError) as exc:
                 log.warning(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
                 self.stop.wait(2)
+        if self.round_thread:
+            self.round_thread.join(timeout=settings.CHECK_DEADLINE + 2)
+        self.queue_pool.shutdown(wait=True, cancel_futures=True)
+        self.round_pool.shutdown(wait=True, cancel_futures=True)
         log.info(json.dumps({"event": "stopped"}))
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    pool = db.make_pool(settings.DATABASE_URL, max_size=10)
+    pool = db.make_pool(settings.DATABASE_URL, max_size=16)
     pool.open(wait=True, timeout=30)
     db.init(pool)
     db.seed(pool, settings.SEED_TARGETS)

@@ -1,10 +1,12 @@
+import time
+
 import httpx
 
 from uptime import checker
 
 
 def client_for(handler):
-    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    return httpx.Client(transport=httpx.MockTransport(handler), timeout=5)
 
 
 def test_200_is_up():
@@ -63,4 +65,26 @@ def test_redirect_loop_is_reported():
 
     result = checker.check(client_for(handler), "http://svc/loop")
     assert not result.ok
-    assert result.error == "TooManyRedirects"
+    assert result.error == "too many redirects"
+
+
+def test_slow_redirect_chain_hits_the_deadline():
+    def handler(request):
+        time.sleep(0.3)
+        n = int(request.url.path.strip("/") or 0)
+        return httpx.Response(302, headers={"Location": f"http://svc/{n + 1}"}) if n < 4 else httpx.Response(200)
+
+    started = time.perf_counter()
+    result = checker.check(client_for(handler), "http://svc/0", deadline=0.7)
+    assert not result.ok
+    assert result.error == "timeout"
+    assert time.perf_counter() - started < 1.2
+
+
+def test_redirect_chain_within_limits_is_up():
+    def handler(request):
+        n = int(request.url.path.strip("/") or 0)
+        return httpx.Response(302, headers={"Location": f"http://svc/{n + 1}"}) if n < 5 else httpx.Response(200)
+
+    result = checker.check(client_for(handler), "http://svc/0")
+    assert result.ok

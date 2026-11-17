@@ -45,7 +45,7 @@ services:
   worker:
     <<: *app
     command: ["python", "-m", "uptime.worker"]
-    stop_grace_period: 15s
+    stop_grace_period: 20s
     healthcheck:
       test: ["CMD", "python", "-m", "uptime.healthcheck", "heartbeat", "/tmp/worker-heartbeat", "60"]
       interval: 15s

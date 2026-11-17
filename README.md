@@ -43,6 +43,23 @@ docker compose up -d --build --wait
 
 The first build takes a few minutes. After that, `docker compose up -d` starts everything in seconds.
 
+## Things to try
+
+```
+docker compose ps                         # state and health of every container
+docker compose logs -f worker             # one JSON line per check
+docker compose exec db psql -U uptime -c "SELECT count(*) FROM checks"
+docker compose stop redis                 # /readyz turns 503, the web container turns unhealthy
+docker compose start redis                # and recovers by itself
+docker compose down                       # removes the containers, keeps the volumes
+docker compose up -d                      # targets and history are still there
+docker compose down -v                    # removes the volumes too: everything is gone
+```
+
+Add a target from the page, or with the API:
+
+```
+curl -X POST localhost:8080/api/targets -H "Content-Type: application/json" -d "{\"name\": \"ELTE\", \"url\": \"https://www.elte.hu\"}"
 ```
 
 ## API
@@ -63,7 +80,9 @@ The first build takes a few minutes. After that, `docker compose up -d` starts e
 - `web` and `worker` run as a non-root user (UID 10001) on a read-only filesystem. Only `/tmp` is writable.
 - The worker writes a heartbeat file on every loop. Its healthcheck fails if the file is older than 60 s, which catches a stuck loop even when the process is still running.
 - If Postgres or Redis restarts, the worker logs the error and keeps retrying instead of crashing. The web app's connection pool tests each connection before use, so it doesn't hand out one that died during the restart.
-- `docker compose stop` sends SIGTERM. The worker finishes the current check and exits cleanly.
+- Scheduled rounds run in a background thread, so a slow site never delays a "check now" request. If a round is still running when the next one is due, the next one is skipped and logged instead of piling up.
+- Every check has a 10 s total limit, redirects included (`CHECK_DEADLINE`). Without it, a site that redirects slowly could take 5 s per hop.
+- `docker compose stop` sends SIGTERM. The worker finishes the checks in progress and exits cleanly.
 - Both processes create the schema at startup. A Postgres advisory lock stops them from racing each other on `CREATE TABLE`.
 - Check results older than 7 days are deleted every hour.
 
